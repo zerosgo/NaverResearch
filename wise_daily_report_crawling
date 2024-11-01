@@ -1,0 +1,52 @@
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import Select
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
+from bs4 import BeautifulSoup
+
+# Chrome 브라우저 열기
+driver = webdriver.Chrome()  # ChromeDriver 경로를 설정하세요.
+driver.get('https://comp.wisereport.co.kr/wiseReport/summary/ReportSummary.aspx')  # 크롤링하려는 페이지의 URL로 변경
+
+# 드롭다운 메뉴 요소 찾기
+wait = WebDriverWait(driver, 10)
+dropdown = wait.until(EC.presence_of_element_located((By.ID, 'ddlDate')))
+select = Select(dropdown)
+
+# 모든 날짜 옵션에 대해 반복
+all_dates = [option.get_attribute("value") for option in select.options]
+all_data = []  # 모든 데이터를 저장할 리스트
+
+for date_value in all_dates:
+    # 날짜 선택
+    select.select_by_value(date_value)
+
+    # 검색 버튼 클릭
+    search_button = driver.find_element(By.ID, 'btnsubmit')  # 검색 버튼의 ID 사용
+    search_button.click()
+
+    # 페이지 로드 대기
+    time.sleep(3)  # 또는 WebDriverWait으로 특정 요소가 로드될 때까지 기다리기
+
+    # 현재 페이지에서 테이블 데이터 크롤링
+    soup = BeautifulSoup(driver.page_source, 'html.parser')
+    tables = soup.find_all("table")  # 페이지 내 모든 테이블 찾기
+
+    for table in tables:
+        # 테이블을 DataFrame으로 변환
+        df = pd.read_html(str(table))[0]  # 각 테이블을 읽어 DataFrame으로 변환
+        df['Date'] = date_value  # 날짜를 새로운 열로 추가
+        all_data.append(df)  # 모든 데이터를 리스트에 추가
+
+# 모든 데이터를 하나의 DataFrame으로 합치기
+final_df = pd.concat(all_data, ignore_index=True)
+
+# 결과 출력 또는 파일 저장
+print(final_df)
+final_df.to_csv("crawled_data.csv", index=False)  # CSV 파일로 저장
+
+# 브라우저 닫기
+driver.quit()
