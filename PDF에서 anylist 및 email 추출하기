@@ -1,0 +1,72 @@
+import os
+import re
+import pandas as pd
+from datetime import datetime
+import fitz  # PyMuPDF
+
+# 설정
+folder_path = r"D:\Non_Documents\(02) Coding\Python\ZeroS\Naver\pdf_download"
+error_list = []
+data = []
+
+# PDF 파일 목록 불러오기 (처음 10개만)
+pdf_files = [f for f in os.listdir(folder_path) if f.endswith('.pdf')][:10]
+
+# 정규표현식 패턴 설정
+anylist_pattern = r"(\b[A-Za-z]+\b)(?=\s+(anylist|Anylist))|(?<=anylist|Anylist\s+)(\b[A-Za-z]+\b)"
+email_pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+date_pattern = r"\d{4}[./-]\d{2}[./-]\d{2}"
+
+# PDF 파일 분석
+for file_name in pdf_files:
+    file_path = os.path.join(folder_path, file_name)
+    try:
+        # PyMuPDF로 PDF 파일 열기
+        with fitz.open(file_path) as pdf:
+            text = ""
+            for page_num in range(pdf.page_count):
+                try:
+                    text += pdf[page_num].get_text()
+                except Exception as page_error:
+                    print(f"Error reading page {page_num} in {file_name}: {page_error}")
+                    continue
+
+            # 파일명, 기본 정보
+            file_data = {"파일명": file_name, "Anylist": "", "e-Mail": "", "보고서 날짜": ""}
+
+            # Anylist 이름 추출
+            anylist_matches = re.findall(anylist_pattern, text, re.IGNORECASE)
+            anylist_names = {name[0] or name[2] for name in anylist_matches if name}  # 중복된 이름 제거
+            file_data["Anylist"] = ", ".join(anylist_names)
+
+            # e-Mail 주소 추출
+            email_matches = re.findall(email_pattern, text)
+            file_data["e-Mail"] = ", ".join(email_matches)
+
+            # 보고서 날짜 추출
+            date_matches = re.findall(date_pattern, text)
+            if date_matches:
+                file_data["보고서 날짜"] = date_matches[0]  # 첫 번째 날짜를 사용
+
+            # 데이터 추가
+            data.append(file_data)
+
+    except Exception as e:
+        error_list.append(file_name)
+        print(f"Error processing {file_name}: {e}")
+        continue  # 다음 파일로 넘어가도록 설정
+
+# DataFrame 생성
+df = pd.DataFrame(data)
+
+# 중복 제거 (Anylist 이름 기준)
+df = df.drop_duplicates(subset=["Anylist"])
+
+# 파일 저장
+today_date = datetime.now().strftime("%Y%m%d")
+output_file = f"pdf_anylist_email_{today_date}.csv"
+df.to_csv(output_file, index=False, encoding='utf-8-sig')
+
+# 결과 출력
+print(f"Data extraction completed. Saved to {output_file}")
+print("Error files:", error_list)
