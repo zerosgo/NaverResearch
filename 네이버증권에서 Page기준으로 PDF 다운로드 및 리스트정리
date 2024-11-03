@@ -1,0 +1,121 @@
+import os
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from bs4 import BeautifulSoup
+from webdriver_manager.chrome import ChromeDriverManager
+import requests
+import time
+from tqdm import tqdm
+
+# PDF 저장 경로 설정
+save_path = "D:\(01) Coding\Python\ZeroS\pdf_download"
+os.makedirs(save_path, exist_ok=True)
+
+# WebDriver 옵션 설정
+options = webdriver.ChromeOptions()
+options.add_argument('--headless')
+options.add_argument('--no-sandbox')
+options.add_argument('--disable-dev-shm-usage')
+
+# WebDriver 실행
+driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+# 결과 저장을 위한 리스트 초기화
+reports = []
+error_list = []  # 에러 발생한 종목 정보를 저장할 리스트
+start_page = 601
+end_page = 1200
+
+# 페이지 순회하며 데이터 수집
+for page in tqdm(range(start_page, end_page + 1), desc="페이지 진행 상황"):
+    url = f"https://finance.naver.com/research/company_list.naver?&page={page}"
+    driver.get(url)
+    time.sleep(1)
+
+    html = driver.page_source
+    soup = BeautifulSoup(html, "html.parser")
+
+    for row in soup.select("table.type_1 tbody tr"):
+        stock_name_tag = row.select_one("td a.stock_item")
+        title_tag = row.select_one("td:nth-of-type(2) a")
+        securities_company_tag = row.select_one("td:nth-of-type(3)")
+        pdf_link_tag = row.select_one("td.file a[href$='.pdf']")
+        date_tag = row.select_one("td.date")  # 날짜 데이터를 포함하는 태그
+
+        if stock_name_tag and title_tag and securities_company_tag and pdf_link_tag and date_tag:
+            stock_name = stock_name_tag.text.strip()
+            title = title_tag.text.strip()
+            securities_company = securities_company_tag.text.strip()
+            pdf_link = pdf_link_tag["href"]
+            date = date_tag.text.strip()  # 날짜 데이터 추출
+
+            # PDF 파일 이름 및 경로 설정
+            pdf_name = pdf_link.split("/")[-1]
+            pdf_path = os.path.join(save_path, pdf_name)
+
+            # 파일이 이미 존재하는지 확인
+            if os.path.exists(pdf_path):
+                print(f"Skipped (already exists): {pdf_name}")
+            else:
+                try:
+                    # PDF 파일 다운로드
+                    response = requests.get(pdf_link, stream=True)
+                    if response.status_code == 200:
+                        with open(pdf_path, "wb") as pdf_file:
+                            for chunk in response.iter_content(chunk_size=1024):
+                                pdf_file.write(chunk)
+                        print(f"Downloaded: {pdf_name}")
+                    else:
+                        raise Exception("Failed to download due to bad response")
+                except Exception as e:
+                    print(f"Error downloading {pdf_name}: {e}")
+                    # 에러 발생 시 에러 리스트에 저장
+                    error_list.append({
+                        "종목명": stock_name,
+                        "제목": title,
+                        "증권사": securities_company,
+                        "PDF 링크": pdf_link,
+                        "날짜": date  # 에러 발생 시 날짜 정보도 저장
+                    })
+
+            # 데이터 저장
+            reports.append({
+                "종목명": stock_name,
+                "제목": title,
+                "증권사": securities_company,
+                "PDF 링크": pdf_link,
+                "날짜": date  # 날짜 정보 추가
+            })
+
+driver.quit()
+
+# DataFrame 생성
+df = pd.DataFrame(reports)
+
+# A, B, C, D, E, F 설정
+A = df.iloc[0]["날짜"]
+B = df.iloc[0]["종목명"]
+C = df.iloc[0]["증권사"]
+D = df.iloc[-1]["날짜"]
+E = df.iloc[-1]["종목명"]
+F = df.iloc[-1]["증권사"]
+
+# 파일 이름 설정
+csv_file = f"pdf_{A}_{B}_{C}_{D}_{E}_{F}.csv"
+
+# 기존 CSV 파일이 있으면 데이터 추가
+if os.path.exists(csv_file):
+    existing_df = pd.read_csv(csv_file)
+    df = pd.concat([existing_df, df], ignore_index=True)
+
+# DataFrame을 CSV 파일로 저장
+df.to_csv(csv_file, index=False, encoding="utf-8-sig")
+print(f"데이터가 성공적으로 '{csv_file}' 파일에 저장되었습니다.")
+
+# 에러 리스트가 있을 경우 CSV로 저장
+if error_list:
+    error_df = pd.DataFrame(error_list)
+    error_csv_file = "download_errors.csv"
+    error_df.to_csv(error_csv_file, index=False, encoding="utf-8-sig")
+    print(f"에러 데이터가 '{error_csv_file}' 파일에 저장되었습니다.")
