@@ -1,99 +1,123 @@
-import os
-import re
 import pandas as pd
-from datetime import datetime
-import fitz  # PyMuPDF
-from tqdm import tqdm  # 진행 상황 표시용
+import pymysql
+from sqlalchemy import create_engine
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import Select, WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
+import re
 
-# 설정
-folder_path = r"E:\pdf_download"
-error_list = []
-data = []
+# Chrome 브라우저 열기
+driver = webdriver.Chrome()  # ChromeDriver 경로를 명시하세요.
+driver.get('https://comp.wisereport.co.kr/wiseReport/summary/ReportSummary.aspx')  # 크롤링할 URL
 
-# PDF 파일 목록 불러오기 (폴더 내 모든 파일)
-pdf_files = [f for f in os.listdir(folder_path) if f.endswith('.pdf')]
+# 드롭다운 메뉴가 로드될 때까지 대기
+wait = WebDriverWait(driver, 10)
 
-# 정규 표현식 패턴 설정
-email_pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-date_pattern = r"\d{4}[./-]\d{2}[./-]\d{2}"
-analyst_pattern = r"(?:Analyst|RA)\s+([가-힣]{2,3})"  # "Analyst"나 "RA" 다음의 한국 이름 (2~3글자)
-name_near_email_pattern = r"([가-힣]{2,3})\s+(?:[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})|(?:[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\s+([가-힣]{2,3})"
+# 모든 날짜 옵션 가져오기
+dropdown = wait.until(EC.presence_of_element_located((By.ID, 'ddlDate')))
+select = Select(dropdown)
+all_dates = [option.get_attribute("value") for option in select.options]
+all_data = []  # 데이터를 저장할 리스트
 
-# PDF 파일 분석
-for file_name in tqdm(pdf_files, desc="Processing PDF files", unit="file"):
-    file_path = os.path.join(folder_path, file_name)
+for date_value in all_dates:
     try:
-        # 파일이 비어 있거나 열 수 없는 경우 건너뜁니다.
-        if os.path.getsize(file_path) == 0:
-            print(f"Skipping empty file: {file_name}")
-            error_list.append(file_name)
-            continue
-
-        with fitz.open(file_path) as pdf:
-            text = ""
-            for page_num in range(pdf.page_count):
-                try:
-                    text += pdf[page_num].get_text()
-                except Exception as page_error:
-                    print(f"Error reading page {page_num} in {file_name}: {page_error}")
-                    error_list.append(file_name)
-                    break
-
-            # 파일명, 기본 정보
-            file_data = {
-                "파일명": file_name,
-                "Analyst": None,
-                "RA": None,
-                "Analyst_eMail": None,
-                "RA_eMail": None,
-                "보고서 날짜": None
-            }
-
-            # Analyst 이름 추출 (한국 이름)
-            analyst_matches = re.findall(analyst_pattern, text)
-            if len(analyst_matches) >= 2:
-                file_data["Analyst"] = analyst_matches[0]
-                file_data["RA"] = analyst_matches[1]
-            elif len(analyst_matches) == 1:
-                file_data["Analyst"] = analyst_matches[0]
-            else:
-                # e-Mail 앞/뒤에 있는 한국 이름을 Analyst로 사용
-                email_name_matches = re.findall(name_near_email_pattern, text)
-                email_names = [name[0] or name[1] for name in email_name_matches if name]
-                if len(email_names) >= 2:
-                    file_data["Analyst"] = email_names[0]
-                    file_data["RA"] = email_names[1]
-                elif len(email_names) == 1:
-                    file_data["Analyst"] = email_names[0]
-
-            # e-Mail 주소 추출 및 구분
-            email_matches = re.findall(email_pattern, text)
-            if len(email_matches) >= 2:
-                file_data["Analyst_eMail"] = email_matches[0]
-                file_data["RA_eMail"] = email_matches[1]
-            elif len(email_matches) == 1:
-                file_data["Analyst_eMail"] = email_matches[0]
-
-            # 보고서 날짜 추출
-            date_matches = re.findall(date_pattern, text)
-            file_data["보고서 날짜"] = date_matches[0] if date_matches else None
-
-            # 데이터 추가
-            data.append(file_data)
-
+        print(f"Processing date: {date_value}")
+        
+        # 드롭다운 메뉴와 검색 버튼 다시 찾기 (Stale Element Reference 문제 해결)
+        dropdown = wait.until(EC.presence_of_element_located((By.ID, 'ddlDate')))
+        select = Select(dropdown)
+        select.select_by_value(date_value)
+        
+        # 검색 버튼 클릭
+        search_button = wait.until(EC.element_to_be_clickable((By.ID, 'btnsubmit')))
+        search_button.click()
+        
+        # 테이블이 로드될 때까지 대기
+        wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, 'table')))
+        
+        # BeautifulSoup으로 페이지 파싱 (html.parser 사용)
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        table = soup.find("table", {"class": "Summary_list"})
+        
+        # 데이터 추출
+        rows = table.find_all("tr", {"class": ["itm_t1", "alt_t1"]})
+        for row in rows:
+            cells = row.find_all(["th", "td"])
+            row_data = [cell.get_text(strip=True) for cell in cells]
+            row_data.append(date_value)  # 날짜를 마지막 열에 추가
+            all_data.append(row_data)
+    
     except Exception as e:
-        error_list.append(file_name)
-        print(f"Error processing {file_name}: {e}")
-        continue  # 다음 파일로 진행
+        print(f"오류 발생 (날짜: {date_value}): {e}")
 
-# DataFrame 생성 및 확인
-df = pd.DataFrame(data)
-print("Columns in DataFrame:", df.columns)
+# 크롤링한 데이터를 데이터프레임으로 변환
+columns = ["기업명", "기관명/작성자", "투자의견", "목표주가", "전일수정주가", "제목", "요약", "Date"]
+final_df = pd.DataFrame(all_data, columns=columns)
 
-# CSV 파일 저장
-today_date = datetime.now().strftime("%Y%m%d")
-output_file = f"pdf_anylist_email_{today_date}.csv"
-df.to_csv(output_file, index=False, encoding='utf-8-sig')
-print(f"Data saved to {output_file} with columns:", df.columns)
+# 열 재구성 및 데이터 형식 변경
+final_df['Date'] = pd.to_datetime(final_df['Date'], format='%Y%m%d')  # Date 형식으로 변경
+final_df['종목'] = final_df['기업명'].str.extract(r'(\D+)\(')  # 종목명 추출
+final_df['종목코드'] = final_df['기업명'].str.extract(r'\((\d+)\)')  # 종목코드 추출
 
-print("Error files:", error_list)
+# '기관명/작성자'에서 증권사 추출
+final_df['증권사'] = final_df['기관명/작성자'].str.extract(r'^(\D+)\[')
+
+# '기관명/작성자'에서 복수의 애널리스트를 분리
+analysts = final_df['기관명/작성자'].str.extractall(r'\[(\D+?)\]')
+analysts = analysts.unstack().droplevel(0, axis=1)
+analysts.columns = [f'Analyst{i+1}' for i in range(analysts.shape[1])]
+
+# 결합하면서 결측값을 자동으로 처리
+final_df = pd.concat([final_df, analysts], axis=1)
+
+# 'Analyst1' 열에 쉼표로 구분된 이름이 들어올 경우, 첫 번째와 두 번째 이름을 Analyst1과 Analyst2로 분리
+final_df[['Analyst1', 'Analyst2']] = final_df['Analyst1'].str.split(',', n=1, expand=True)
+final_df['Analyst2'] = final_df['Analyst2'].fillna(final_df['Analyst1'])
+
+# '목표주가'와 '전일수정주가'를 int 형식으로 변환하기 전에 숫자가 아닌 값을 NaN으로 설정
+final_df['목표주가'] = pd.to_numeric(final_df['목표주가'].str.replace(',', ''), errors='coerce')
+final_df['전일수정주가'] = pd.to_numeric(final_df['전일수정주가'].str.replace(',', ''), errors='coerce').fillna(0).astype(int)
+
+# '목표주가'가 NaN인 행 제거
+final_df = final_df.dropna(subset=['목표주가'])
+
+# '목표주가'를 int 형식으로 변환
+final_df['목표주가'] = final_df['목표주가'].astype(int)
+
+# 불필요한 열 삭제
+final_df = final_df[['Date', '종목', '종목코드', '증권사', 'Analyst1', 'Analyst2', '목표주가', '전일수정주가']]
+
+engine = create_engine('mysql+pymysql://root:7963@127.0.0.1:3306/stock_db')
+con = pymysql.connect(
+    user = 'root',
+    passwd = '7963',
+    host ='127.0.0.1',
+    db = 'stock_db',
+    charset = 'utf8'
+)
+
+mycursor = con.cursor()
+
+query = """
+    insert into kor_research_report (Date, 종목, 종목코드, 증권사, Analyst1, Analyst2, 목표주가, 전일수정주가)
+    values (%s, %s, %s, %s, %s, %s, %s, %s) as new
+    on duplicate key update
+    증권사 = new.증권사, Analyst1 = new.Analyst1 , Analyst2 = new.Analyst2, 목표주가 = new.목표주가, 전일수정주가 = new.전일수정주가;
+"""
+
+args = final_df.values.tolist()
+mycursor.executemany(query, args)
+con.commit()
+
+
+# 결과 확인
+print(final_df.head())
+final_df.to_csv("crawled_data.csv", index=False, encoding='utf-8-sig')  # CSV 파일로 저장
+
+engine.dispose()
+con.close() 
+
+# 브라우저 닫기
+driver.quit()
