@@ -1,52 +1,123 @@
 import pandas as pd
+import pymysql
+from sqlalchemy import create_engine
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import Select
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import Select, WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-import time
 from bs4 import BeautifulSoup
+import re
 
 # Chrome 브라우저 열기
-driver = webdriver.Chrome()  # ChromeDriver 경로를 설정하세요.
-driver.get('https://comp.wisereport.co.kr/wiseReport/summary/ReportSummary.aspx')  # 크롤링하려는 페이지의 URL로 변경
+driver = webdriver.Chrome()  # ChromeDriver 경로를 명시하세요.
+driver.get('https://comp.wisereport.co.kr/wiseReport/summary/ReportSummary.aspx')  # 크롤링할 URL
 
-# 드롭다운 메뉴 요소 찾기
+# 드롭다운 메뉴가 로드될 때까지 대기
 wait = WebDriverWait(driver, 10)
+
+# 모든 날짜 옵션 가져오기
 dropdown = wait.until(EC.presence_of_element_located((By.ID, 'ddlDate')))
 select = Select(dropdown)
-
-# 모든 날짜 옵션에 대해 반복
 all_dates = [option.get_attribute("value") for option in select.options]
-all_data = []  # 모든 데이터를 저장할 리스트
+all_data = []  # 데이터를 저장할 리스트
 
 for date_value in all_dates:
-    # 날짜 선택
-    select.select_by_value(date_value)
+    try:
+        print(f"Processing date: {date_value}")
+        
+        # 드롭다운 메뉴와 검색 버튼 다시 찾기 (Stale Element Reference 문제 해결)
+        dropdown = wait.until(EC.presence_of_element_located((By.ID, 'ddlDate')))
+        select = Select(dropdown)
+        select.select_by_value(date_value)
+        
+        # 검색 버튼 클릭
+        search_button = wait.until(EC.element_to_be_clickable((By.ID, 'btnsubmit')))
+        search_button.click()
+        
+        # 테이블이 로드될 때까지 대기
+        wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, 'table')))
+        
+        # BeautifulSoup으로 페이지 파싱 (html.parser 사용)
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        table = soup.find("table", {"class": "Summary_list"})
+        
+        # 데이터 추출
+        rows = table.find_all("tr", {"class": ["itm_t1", "alt_t1"]})
+        for row in rows:
+            cells = row.find_all(["th", "td"])
+            row_data = [cell.get_text(strip=True) for cell in cells]
+            row_data.append(date_value)  # 날짜를 마지막 열에 추가
+            all_data.append(row_data)
+    
+    except Exception as e:
+        print(f"오류 발생 (날짜: {date_value}): {e}")
 
-    # 검색 버튼 클릭
-    search_button = driver.find_element(By.ID, 'btnsubmit')  # 검색 버튼의 ID 사용
-    search_button.click()
+# 크롤링한 데이터를 데이터프레임으로 변환
+columns = ["기업명", "기관명/작성자", "투자의견", "목표주가", "전일수정주가", "제목", "요약", "Date"]
+final_df = pd.DataFrame(all_data, columns=columns)
 
-    # 페이지 로드 대기
-    time.sleep(3)  # 또는 WebDriverWait으로 특정 요소가 로드될 때까지 기다리기
+# 열 재구성 및 데이터 형식 변경
+final_df['Date'] = pd.to_datetime(final_df['Date'], format='%Y%m%d')  # Date 형식으로 변경
+final_df['종목'] = final_df['기업명'].str.extract(r'(\D+)\(')  # 종목명 추출
+final_df['종목코드'] = final_df['기업명'].str.extract(r'\((\d+)\)')  # 종목코드 추출
 
-    # 현재 페이지에서 테이블 데이터 크롤링
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-    tables = soup.find_all("table")  # 페이지 내 모든 테이블 찾기
+# '기관명/작성자'에서 증권사 추출
+final_df['증권사'] = final_df['기관명/작성자'].str.extract(r'^(\D+)\[')
 
-    for table in tables:
-        # 테이블을 DataFrame으로 변환
-        df = pd.read_html(str(table))[0]  # 각 테이블을 읽어 DataFrame으로 변환
-        df['Date'] = date_value  # 날짜를 새로운 열로 추가
-        all_data.append(df)  # 모든 데이터를 리스트에 추가
+# '기관명/작성자'에서 복수의 애널리스트를 분리
+analysts = final_df['기관명/작성자'].str.extractall(r'\[(\D+?)\]')
+analysts = analysts.unstack().droplevel(0, axis=1)
+analysts.columns = [f'Analyst{i+1}' for i in range(analysts.shape[1])]
 
-# 모든 데이터를 하나의 DataFrame으로 합치기
-final_df = pd.concat(all_data, ignore_index=True)
+# 결합하면서 결측값을 자동으로 처리
+final_df = pd.concat([final_df, analysts], axis=1)
 
-# 결과 출력 또는 파일 저장
-print(final_df)
-final_df.to_csv("crawled_data.csv", index=False)  # CSV 파일로 저장
+# 'Analyst1' 열에 쉼표로 구분된 이름이 들어올 경우, 첫 번째와 두 번째 이름을 Analyst1과 Analyst2로 분리
+final_df[['Analyst1', 'Analyst2']] = final_df['Analyst1'].str.split(',', n=1, expand=True)
+final_df['Analyst2'] = final_df['Analyst2'].fillna(final_df['Analyst1'])
+
+# '목표주가'와 '전일수정주가'를 int 형식으로 변환하기 전에 숫자가 아닌 값을 NaN으로 설정
+final_df['목표주가'] = pd.to_numeric(final_df['목표주가'].str.replace(',', ''), errors='coerce')
+final_df['전일수정주가'] = pd.to_numeric(final_df['전일수정주가'].str.replace(',', ''), errors='coerce').fillna(0).astype(int)
+
+# '목표주가'가 NaN인 행 제거
+final_df = final_df.dropna(subset=['목표주가'])
+
+# '목표주가'를 int 형식으로 변환
+final_df['목표주가'] = final_df['목표주가'].astype(int)
+
+# 불필요한 열 삭제
+final_df = final_df[['Date', '종목', '종목코드', '증권사', 'Analyst1', 'Analyst2', '목표주가', '전일수정주가']]
+
+engine = create_engine('mysql+pymysql://root:7963@127.0.0.1:3306/stock_db')
+con = pymysql.connect(
+    user = 'root',
+    passwd = '7963',
+    host ='127.0.0.1',
+    db = 'stock_db',
+    charset = 'utf8'
+)
+
+mycursor = con.cursor()
+
+query = """
+    insert into kor_research_report (Date, 종목, 종목코드, 증권사, Analyst1, Analyst2, 목표주가, 전일수정주가)
+    values (%s, %s, %s, %s, %s, %s, %s, %s) as new
+    on duplicate key update
+    증권사 = new.증권사, Analyst1 = new.Analyst1 , Analyst2 = new.Analyst2, 목표주가 = new.목표주가, 전일수정주가 = new.전일수정주가;
+"""
+
+args = final_df.values.tolist()
+mycursor.executemany(query, args)
+con.commit()
+
+
+# 결과 확인
+print(final_df.head())
+final_df.to_csv("crawled_data.csv", index=False, encoding='utf-8-sig')  # CSV 파일로 저장
+
+engine.dispose()
+con.close() 
 
 # 브라우저 닫기
 driver.quit()
