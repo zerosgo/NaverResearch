@@ -1,0 +1,99 @@
+import os
+import re
+import pandas as pd
+from datetime import datetime
+import fitz  # PyMuPDF
+from tqdm import tqdm  # 진행 상황 표시용
+
+# 설정
+folder_path = r"E:\pdf_download"
+error_list = []
+data = []
+
+# PDF 파일 목록 불러오기 (폴더 내 모든 파일)
+pdf_files = [f for f in os.listdir(folder_path) if f.endswith('.pdf')]
+
+# 정규 표현식 패턴 설정
+email_pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+date_pattern = r"\d{4}[./-]\d{2}[./-]\d{2}"
+analyst_pattern = r"(?:Analyst|RA)\s+([가-힣]{2,3})"  # "Analyst"나 "RA" 다음의 한국 이름 (2~3글자)
+name_near_email_pattern = r"([가-힣]{2,3})\s+(?:[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})|(?:[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\s+([가-힣]{2,3})"
+
+# PDF 파일 분석
+for file_name in tqdm(pdf_files, desc="Processing PDF files", unit="file"):
+    file_path = os.path.join(folder_path, file_name)
+    try:
+        # 파일이 비어 있거나 열 수 없는 경우 건너뜁니다.
+        if os.path.getsize(file_path) == 0:
+            print(f"Skipping empty file: {file_name}")
+            error_list.append(file_name)
+            continue
+
+        with fitz.open(file_path) as pdf:
+            text = ""
+            for page_num in range(pdf.page_count):
+                try:
+                    text += pdf[page_num].get_text()
+                except Exception as page_error:
+                    print(f"Error reading page {page_num} in {file_name}: {page_error}")
+                    error_list.append(file_name)
+                    break
+
+            # 파일명, 기본 정보
+            file_data = {
+                "파일명": file_name,
+                "Analyst": None,
+                "RA": None,
+                "Analyst_eMail": None,
+                "RA_eMail": None,
+                "보고서 날짜": None
+            }
+
+            # Analyst 이름 추출 (한국 이름)
+            analyst_matches = re.findall(analyst_pattern, text)
+            if len(analyst_matches) >= 2:
+                file_data["Analyst"] = analyst_matches[0]
+                file_data["RA"] = analyst_matches[1]
+            elif len(analyst_matches) == 1:
+                file_data["Analyst"] = analyst_matches[0]
+            else:
+                # e-Mail 앞/뒤에 있는 한국 이름을 Analyst로 사용
+                email_name_matches = re.findall(name_near_email_pattern, text)
+                email_names = [name[0] or name[1] for name in email_name_matches if name]
+                if len(email_names) >= 2:
+                    file_data["Analyst"] = email_names[0]
+                    file_data["RA"] = email_names[1]
+                elif len(email_names) == 1:
+                    file_data["Analyst"] = email_names[0]
+
+            # e-Mail 주소 추출 및 구분
+            email_matches = re.findall(email_pattern, text)
+            if len(email_matches) >= 2:
+                file_data["Analyst_eMail"] = email_matches[0]
+                file_data["RA_eMail"] = email_matches[1]
+            elif len(email_matches) == 1:
+                file_data["Analyst_eMail"] = email_matches[0]
+
+            # 보고서 날짜 추출
+            date_matches = re.findall(date_pattern, text)
+            file_data["보고서 날짜"] = date_matches[0] if date_matches else None
+
+            # 데이터 추가
+            data.append(file_data)
+
+    except Exception as e:
+        error_list.append(file_name)
+        print(f"Error processing {file_name}: {e}")
+        continue  # 다음 파일로 진행
+
+# DataFrame 생성 및 확인
+df = pd.DataFrame(data)
+print("Columns in DataFrame:", df.columns)
+
+# CSV 파일 저장
+today_date = datetime.now().strftime("%Y%m%d")
+output_file = f"pdf_anylist_email_{today_date}.csv"
+df.to_csv(output_file, index=False, encoding='utf-8-sig')
+print(f"Data saved to {output_file} with columns:", df.columns)
+
+print("Error files:", error_list)
