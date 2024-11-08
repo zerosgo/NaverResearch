@@ -1,0 +1,144 @@
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from datetime import datetime, timedelta
+from io import StringIO
+import pymysql
+import time
+
+# 시작 날짜, 끝 날짜, 간격 설정
+start_date = datetime.strptime("2024-06-03", "%Y-%m-%d")
+end_date = datetime.strptime("2024-11-06", "%Y-%m-%d")
+interval_days = 3
+
+# Selenium WebDriver 설정
+driver = webdriver.Chrome()
+
+try:
+    # URL로 이동
+    url = "https://comp.fnguide.com/SVO2/ASP/SVD_Report_Summary.asp"
+    driver.get(url)
+
+    current_date = start_date
+
+    # 3일 간격으로 데이터 수집
+    while current_date <= end_date:
+        # 시작 날짜 설정
+        start_date_element = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.ID, "inFromDate"))
+        )
+        start_date_element.click()
+
+        # 월 설정
+        month_dropdown = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.CLASS_NAME, "ui-datepicker-month"))
+        )
+        month_dropdown.click()
+        month_option = driver.find_element(
+            By.XPATH, f"//select[@class='ui-datepicker-month']/option[@value='{current_date.month - 1}']"
+        )
+        month_option.click()
+
+        # 시작 날짜 설정
+        day_option = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable(
+                (By.XPATH, f"//td[@data-month='{current_date.month - 1}' and @data-year='{current_date.year}']/a[text()='{current_date.day}']")
+            )
+        )
+        day_option.click()
+        time.sleep(1)
+
+        # 끝 날짜 설정 (current_date + interval_days)
+        end_date_element = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.ID, "inToDate"))
+        )
+        end_date_element.click()
+
+        # 끝 월 설정
+        month_dropdown = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.CLASS_NAME, "ui-datepicker-month"))
+        )
+        month_dropdown.click()
+        end_month_option = driver.find_element(
+            By.XPATH, f"//select[@class='ui-datepicker-month']/option[@value='{(current_date + timedelta(days=interval_days)).month - 1}']"
+        )
+        end_month_option.click()
+
+        # 끝 날짜 설정
+        end_day_option = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable(
+                (By.XPATH, f"//td[@data-month='{(current_date + timedelta(days=interval_days)).month - 1}' and @data-year='{(current_date + timedelta(days=interval_days)).year}']/a[text()='{(current_date + timedelta(days=interval_days)).day}']")
+            )
+        )
+        end_day_option.click()
+        time.sleep(1)
+
+        # 조회 버튼 클릭
+        search_button = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.ID, "btnSearch"))
+        )
+        search_button.click()
+        time.sleep(1)
+
+        # 테이블 로드 대기 및 첫 번째 테이블 가져오기
+        table = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.TAG_NAME, "table"))
+        )
+        table_html = table.get_attribute("outerHTML")
+        df = pd.read_html(StringIO(table_html))[0]
+
+        # 데이터 클렌징
+        if not df.empty and df.shape[1] >= 6:
+            # 열 이름 설정
+            df.columns = ['날짜', '종목명 | 리포트요약', '투자의견', '목표주가', '전일종가', '제공처/작성자']
+
+            # 날짜 형식을 변환
+            df['날짜'] = pd.to_datetime(df['날짜'], format='%Y/%m/%d').dt.strftime('%Y-%m-%d')
+
+            # 종목명, 종목코드, 목표주가, 전일종가, 증권사, 전문가 추출
+            df['종목'] = df['종목명 | 리포트요약'].apply(lambda x: x.split()[0] if '-' in x else x.strip())
+            df['종목코드'] = df['종목명 | 리포트요약'].str.extract(r'A(\d{6})')[0]
+            df['목표주가'] = pd.to_numeric(df['목표주가'], errors='coerce')
+            df['전일종가'] = pd.to_numeric(df['전일종가'], errors='coerce')
+            df.dropna(subset=['목표주가'], inplace=True)
+            df['목표주가'] = df['목표주가'].astype(int)
+            df['전일종가'] = df['전일종가'].astype(int)
+            df['증권사'] = df['제공처/작성자'].apply(lambda x: x.split()[0])
+            df['전문가'] = df['제공처/작성자'].apply(lambda x: x.split()[1] if len(x.split()) > 1 else '')
+            df.drop_duplicates(subset=['날짜', '종목코드', '증권사', '전문가'], keep='first', inplace=True)
+            df = df[['날짜', '종목', '종목코드', '증권사', '전문가', '목표주가', '전일종가']]
+
+            # 데이터베이스 저장
+            con = pymysql.connect(
+                user='root',
+                passwd='7963',
+                host='127.0.0.1',
+                db='stock_db',
+                charset='utf8'
+            )
+            mycursor = con.cursor()
+            query = """
+                INSERT INTO kor_research_report_daily (날짜, 종목, 종목코드, 증권사, 전문가, 목표주가, 전일종가)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    증권사=VALUES(증권사), 전문가=VALUES(전문가), 목표주가=VALUES(목표주가), 전일종가=VALUES(전일종가);
+            """
+            args = df.values.tolist()
+            mycursor.executemany(query, args)
+            con.commit()
+            con.close()
+
+        else:
+            print("데이터프레임이 비어 있거나 예상한 형식이 아닙니다.")
+
+        # 다음 3일 간격으로 날짜를 이동
+        current_date += timedelta(days=interval_days)
+
+except Exception as e:
+    print("오류 발생:", e)
+
+finally:
+    # WebDriver 종료
+    driver.quit()
