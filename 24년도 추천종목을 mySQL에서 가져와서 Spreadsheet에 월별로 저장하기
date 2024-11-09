@@ -1,0 +1,67 @@
+import pandas as pd
+import pymysql
+from datetime import datetime
+import gspread
+from gspread_dataframe import set_with_dataframe
+from google.oauth2.service_account import Credentials
+
+# Google Sheets API 인증 및 스프레드시트 설정
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# JSON 파일 경로로 Google Sheets API 자격 증명 설정
+credentials = Credentials.from_service_account_file(
+    r'D:\(01) Coding\Python\ZeroS\spreadsheet-python-api-441210-3c3a3801701c.json',
+    scopes=scopes
+)
+
+# gspread 클라이언트 초기화
+gc = gspread.authorize(credentials)
+
+# Google 스프레드시트 ID
+spreadsheet_id = '1sJALwLv8j8RgIPOPPTwFaTRgRDVjQEanTVkCEKHvzuU'
+
+# 스프레드시트 열기
+spreadsheet = gc.open_by_key(spreadsheet_id)
+
+# MySQL 연결 설정
+connection = pymysql.connect(
+    user='root', 
+    passwd='7963', 
+    host='127.0.0.1', 
+    db='stock_db', 
+    charset='utf8'
+)
+
+# SQL 쿼리를 통해 데이터 가져오기 (테이블명 변경)
+query = "SELECT * FROM kor_research_report_daily"
+df = pd.read_sql(query, connection)
+
+# MySQL 연결 종료
+connection.close()
+
+# "날짜" 열을 날짜 형식으로 변환하고 시간 부분 제거
+df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce').dt.strftime('%Y-%m-%d')
+
+# 종목코드를 6자리 문자열로 변환 (앞에 0을 포함하도록)
+df['종목코드'] = df['종목코드'].apply(lambda x: f"{int(x):06}")
+
+# 월별로 데이터 분리 및 Google Sheets에 저장
+for month, month_df in df.groupby(df['날짜'].str[:7]):
+    month_str = month  # 예: '2024-01'
+    
+    # 해당 월의 시트가 없으면 새 시트를 생성하고, 있으면 불러옴
+    try:
+        worksheet = spreadsheet.worksheet(month_str)
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=month_str, rows=100, cols=20)
+
+    # 월별 데이터프레임을 Google Sheets 시트에 기록
+    set_with_dataframe(worksheet, month_df, include_index=False)
+
+    # 저장된 데이터 확인 (옵션)
+    print(f"{month_str} 시트에 데이터가 저장되었습니다.")
+    
+    //*[@id="content"]/div[2]/div[2]/table/tbody/tr[2]/td[1]/em
+    //*[@id="content"]/div[5]/table/tbody/tr[1]/td[1]
+    //*[@id="middle"]/dl/dd[4]
+    
