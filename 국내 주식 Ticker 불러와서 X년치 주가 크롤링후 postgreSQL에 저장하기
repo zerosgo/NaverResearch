@@ -1,0 +1,75 @@
+import pymysql
+from sqlalchemy import create_engine
+import pandas as pd
+from datetime import date
+from dateutil.relativedelta import relativedelta
+import requests as rq
+import time
+from tqdm import tqdm
+from io import BytesIO
+import psycopg2
+
+con = psycopg2.connect(
+    user='postgres',
+    password='7963',
+    host='127.0.0.1',
+    dbname='postgres'
+)
+
+mycursor = con.cursor()
+
+query = """
+    SELECT * FROM kor_ticker
+    WHERE 기준일 = (SELECT MAX(기준일) FROM kor_ticker)
+      AND 종목구분 = '보통주';
+"""
+
+ticker_list = pd.read_sql(query, con)
+
+
+query = """
+    INSERT INTO kor_price (날짜, 시가, 고가, 저가, 종가, 거래량, 종목코드)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (날짜, 종목코드) DO UPDATE SET
+        시가 = EXCLUDED.시가,
+        고가 = EXCLUDED.고가,
+        저가 = EXCLUDED.저가,
+        종가 = EXCLUDED.종가,
+        거래량 = EXCLUDED.거래량;
+"""
+
+error_list = []
+
+for i in tqdm(range(0, len(ticker_list))):
+    
+    ticker = ticker_list['종목코드'][i]
+    
+    fr = (date.today() + relativedelta(years=-5)).strftime("%Y%m%d")
+    to = (date.today()).strftime("%Y%m%d")
+
+
+    try:
+        url = f'''https://m.stock.naver.com/front-api/external/chart/domestic/info?symbol={ticker}&requestType=1&startTime={fr}&endTime={to}&timeframe=day'''
+           
+        data = rq.get(url).content
+        data_price = pd.read_csv(BytesIO(data))
+    
+        import re
+        price = data_price.iloc[:, 0:6]
+        price.columns = ['날짜', '시가', '고가', '저가', '종가', '거래량']
+        price = price.dropna()
+        price['날짜'] = price['날짜'].str.extract('(\d+)')
+        price['날짜'] = pd.to_datetime(price['날짜'])
+        price['종목코드'] = ticker
+        
+        args = price.values.tolist()
+        mycursor.executemany(query, args)
+        con.commit()
+
+    except:
+        print(ticker)
+        error_list.append(ticker)
+    
+    time.sleep(1)
+
+con.close()    
