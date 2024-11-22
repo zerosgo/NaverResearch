@@ -1,0 +1,73 @@
+import requests as rq
+import pandas as pd
+from datetime import date
+from dateutil.relativedelta import relativedelta
+from tqdm import tqdm
+import time
+
+# 에러 종목 기록
+error_list = []
+
+# 재시도 함수
+def fetch_full_data(ticker, fr, to, max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            # 데이터 요청
+            url = f"https://m.stock.naver.com/front-api/external/chart/domestic/info?symbol={ticker}&requestType=1&startTime={fr}&endTime={to}&timeframe=day"
+            response = rq.get(url)
+            if not response.ok:
+                raise ValueError(f"API 요청 실패: {response.status_code}")
+
+            # 데이터 로드
+            data = response.json()  # JSON 형식으로 데이터 로드
+            if not data.get('chartData'):
+                raise ValueError("데이터 없음")
+
+            # 데이터프레임 변환
+            data_price = pd.DataFrame(data['chartData'])
+            if len(data_price) > 0:
+                return data_price
+
+            print(f"{ticker}: 데이터 크기 부족. 재시도 {attempt + 1}/{max_retries}")
+            time.sleep(1)  # 딜레이 추가
+        except Exception as e:
+            print(f"{ticker}: 오류 발생 - {e}")
+
+    # 재시도 실패
+    print(f"{ticker}: 데이터 로딩 실패.")
+    return None
+
+
+# 메인 코드
+for i in tqdm(range(len(ticker_list))):
+    ticker = ticker_list['종목코드'][i]
+    fr = (date.today() + relativedelta(years=-5)).strftime("%Y%m%d")
+    to = (date.today()).strftime("%Y%m%d")
+
+    try:
+        # 데이터 로드 (완전 로딩 보장)
+        data_price = fetch_full_data(ticker, fr, to)
+
+        # 데이터 처리
+        if data_price is not None and not data_price.empty:
+            data_price = data_price.iloc[:, 0:6]  # 필요한 컬럼만 선택
+            data_price.columns = ['날짜', '시가', '고가', '저가', '종가', '거래량']
+            data_price = data_price.dropna()
+            data_price['날짜'] = pd.to_datetime(data_price['날짜'])
+            data_price['종목코드'] = ticker
+
+            # SQL 저장
+            args = data_price.values.tolist()
+            mycursor.executemany(query, args)
+            con.commit()
+        else:
+            print(f"{ticker}: 데이터 부족.")
+            error_list.append(ticker)
+
+    except Exception as e:
+        print(f"{ticker}: 처리 중 오류 - {e}")
+        error_list.append(ticker)
+
+    time.sleep(1)  # 요청 간 딜레이
+
+con.close()
